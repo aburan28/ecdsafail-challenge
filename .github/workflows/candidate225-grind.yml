@@ -1,0 +1,78 @@
+name: Candidate225 nonce grind
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: First nonce in the range
+        required: true
+        default: "1500000"
+      count:
+        description: Total nonces across all shards
+        required: true
+        default: "12000000"
+      mask:
+        description: Exact CCZ removal mask
+        required: true
+        default: "0x3f"
+      threads:
+        description: Worker threads per runner
+        required: true
+        default: "4"
+
+permissions:
+  contents: read
+
+jobs:
+  grind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify frozen inputs
+        run: |
+          echo "215e8fd7c893aa3e5d8012a6194ed7cef40eb6d3bf9975f13ddf4173460dda70  grinder/prefilter-src.tar.gz" | sha256sum -c -
+          echo "e40296f2e3d143013f4d4c4d47c54ab35d6f91ea5a6d817eba9b9edc5100fbff  grinder/parent.ops.bin" | sha256sum -c -
+
+      - name: Build prefilter
+        run: |
+          mkdir -p grinder/source
+          tar -xzf grinder/prefilter-src.tar.gz -C grinder/source --strip-components=1
+          cargo build --release --locked --manifest-path grinder/source/Cargo.toml --bin nonce_prefilter_v2
+
+      - name: Scan shard
+        env:
+          RANGE_START: ${{ inputs.start }}
+          RANGE_COUNT: ${{ inputs.count }}
+          REMOVE_MASK: ${{ inputs.mask }}
+          THREADS: ${{ inputs.threads }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: "20"
+        run: |
+          base=$((RANGE_COUNT / SHARDS))
+          extra=$((RANGE_COUNT % SHARDS))
+          shard_count=$base
+          if ((SHARD < extra)); then shard_count=$((shard_count + 1)); fi
+          prefix=$((SHARD * base))
+          if ((SHARD < extra)); then prefix=$((prefix + SHARD)); else prefix=$((prefix + extra)); fi
+          shard_start=$((RANGE_START + prefix))
+          mkdir -p results
+          printf 'start=%s\ncount=%s\nmask=%s\nthreads=%s\n' "$shard_start" "$shard_count" "$REMOVE_MASK" "$THREADS" > results/run.meta
+          env GRINDER_REMOVE_MASK="$REMOVE_MASK" GRINDER_PREFILTER=observe \
+            grinder/source/target/release/nonce_prefilter_v2 \
+            grinder/parent.ops.bin "$shard_start" "$shard_count" "$THREADS" \
+            | tee results/shard.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: candidate225-shard-${{ matrix.shard }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 1
