@@ -1,0 +1,73 @@
+name: Candidate231 HMR-affine nonce grind
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: First nonce in the range
+        required: true
+        default: "0"
+      count:
+        description: Total nonces across all shards
+        required: true
+        default: "6000000"
+      threads:
+        description: Worker threads per runner
+        required: true
+        default: "4"
+
+permissions:
+  contents: read
+
+jobs:
+  grind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify frozen inputs
+        run: |
+          echo "215e8fd7c893aa3e5d8012a6194ed7cef40eb6d3bf9975f13ddf4173460dda70  grinder/prefilter-src.tar.gz" | sha256sum -c -
+          echo "ea014a2f9990864d82d188cb8a5ead46481b714e84a235afe96e9ca73bce6f5d  grinder/hmr-affine-c2b.ops.bin" | sha256sum -c -
+
+      - name: Build prefilter
+        run: |
+          mkdir -p grinder/source
+          tar -xzf grinder/prefilter-src.tar.gz -C grinder/source --strip-components=1
+          cargo build --release --locked --manifest-path grinder/source/Cargo.toml --bin nonce_prefilter_v2
+
+      - name: Scan shard
+        env:
+          RANGE_START: ${{ inputs.start }}
+          RANGE_COUNT: ${{ inputs.count }}
+          THREADS: ${{ inputs.threads }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: "20"
+        run: |
+          base=$((RANGE_COUNT / SHARDS))
+          extra=$((RANGE_COUNT % SHARDS))
+          shard_count=$base
+          if ((SHARD < extra)); then shard_count=$((shard_count + 1)); fi
+          prefix=$((SHARD * base))
+          if ((SHARD < extra)); then prefix=$((prefix + SHARD)); else prefix=$((prefix + extra)); fi
+          shard_start=$((RANGE_START + prefix))
+          mkdir -p results
+          printf 'start=%s\ncount=%s\nmask=0x00\nthreads=%s\n' "$shard_start" "$shard_count" "$THREADS" > results/run.meta
+          env GRINDER_REMOVE_MASK=0x00 GRINDER_PREFILTER=observe \
+            grinder/source/target/release/nonce_prefilter_v2 \
+            grinder/hmr-affine-c2b.ops.bin "$shard_start" "$shard_count" "$THREADS" \
+            | tee results/shard.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: candidate231-hmr-shard-${{ matrix.shard }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 1
